@@ -10,7 +10,7 @@ import sys
 print(sys.prefix)
 exit()
 ```
-图![gif.gif](https://github.com/Evilmass/OBSscripts-bilibili-live/releases/download/doc-assets/windows-gif.gif)
+动图![gif.gif](https://github.com/Evilmass/OBSscripts-bilibili-live/releases/download/doc-assets/windows-gif.gif)
 #### 检查版本
 ```bash
 python3.10 --version
