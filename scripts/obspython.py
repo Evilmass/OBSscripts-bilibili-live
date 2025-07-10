@@ -20531,7 +20531,7 @@ def timer_add(check_poll, param):
     return None
 
 
-def obs_properties_add_button(live_props, param, param1, rtmp_stream_code_copy):
+def obs_properties_add_button(props, name, text, callback):
     return None
 
 
