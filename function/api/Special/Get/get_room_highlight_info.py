@@ -210,6 +210,7 @@ if __name__ == '__main__':
         if room_info["success"]:
             print(f"房间ID: {room_info['data']['room_id']}")
             print(f"完整高亮信息: {room_info['data']['highlight_info']}")
+            print(room_info)
         else:
             print(f"获取房间信息失败: {room_info['error']}")
             if "status_code" in room_info and room_info["status_code"]:

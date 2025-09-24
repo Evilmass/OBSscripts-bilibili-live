@@ -162,7 +162,7 @@ if __name__ == "__main__":
         # 获取用户信息
         user_info = authenticator.get_user_info()
         if user_info["success"]:
-            print("# 在这里处理成功的用户信息")
+            print("# 在这里处理成功的用户信息",user_info)
             pass
         else:
             print("# 在这里处理获取用户信息失败的情况")
