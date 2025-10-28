@@ -57,13 +57,55 @@
             color: #4CAF50;
         }
 
-        .messages-container {
+        /* 选项卡样式 */
+        .tabs {
+            display: flex;
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 10px 10px 0 0;
+            overflow-x: auto;
+        }
+
+        .tab {
+            padding: 12px 20px;
+            cursor: pointer;
+            border: none;
+            background: transparent;
+            color: white;
+            font-size: 1rem;
+            white-space: nowrap;
+            transition: all 0.3s ease;
+        }
+
+        .tab:hover {
+            background: rgba(255, 255, 255, 0.1);
+        }
+
+        .tab.active {
+            background: rgba(76, 175, 80, 0.3);
+            border-bottom: 3px solid #4CAF50;
+        }
+
+        .tab-badge {
+            background: #f44336;
+            color: white;
+            border-radius: 10px;
+            padding: 2px 6px;
+            font-size: 0.8rem;
+            margin-left: 5px;
+        }
+
+        /* 消息容器样式 */
+        .messages-section {
+            display: none;
             height: 600px;
             overflow-y: auto;
             background: rgba(0, 0, 0, 0.3);
-            border-radius: 10px;
+            border-radius: 0 0 10px 10px;
             padding: 15px;
-            margin-bottom: 20px;
+        }
+
+        .messages-section.active {
+            display: block;
         }
 
         .message {
@@ -78,6 +120,7 @@
             to { opacity: 1; transform: translateY(0); }
         }
 
+        /* 消息类型样式 */
         .message-danmu {
             background: rgba(76, 175, 80, 0.2);
             border-left: 4px solid #4CAF50;
@@ -103,6 +146,36 @@
             border-left: 4px solid #9C27B0;
         }
 
+        .message-combo {
+            background: rgba(255, 87, 34, 0.2);
+            border-left: 4px solid #FF5722;
+        }
+
+        .message-like {
+            background: rgba(233, 30, 99, 0.2);
+            border-left: 4px solid #E91E63;
+        }
+
+        .message-guard {
+            background: rgba(103, 58, 183, 0.2);
+            border-left: 4px solid #673AB7;
+        }
+
+        .message-superchat {
+            background: rgba(255, 152, 0, 0.2);
+            border-left: 4px solid #FF9800;
+        }
+
+        .message-redpocket {
+            background: rgba(244, 67, 54, 0.2);
+            border-left: 4px solid #F44336;
+        }
+
+        .message-toast {
+            background: rgba(0, 188, 212, 0.2);
+            border-left: 4px solid #00BCD4;
+        }
+
         .message-header {
             display: flex;
             justify-content: space-between;
@@ -125,6 +198,22 @@
 
         .wealth-info {
             color: #FF9800;
+        }
+
+        .superchat-message {
+            margin-top: 5px;
+            padding: 8px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 5px;
+            font-style: italic;
+        }
+
+        .winners-list {
+            margin-top: 5px;
+            padding: 8px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 5px;
+            font-size: 0.9rem;
         }
 
         .controls {
@@ -187,6 +276,14 @@
             50% { opacity: 0.5; }
             100% { opacity: 1; }
         }
+
+        /* 空状态提示 */
+        .empty-state {
+            text-align: center;
+            padding: 40px;
+            color: rgba(255, 255, 255, 0.5);
+            font-size: 1.1rem;
+        }
     </style>
 </head>
 <body>
@@ -226,8 +323,34 @@
             </div>
         </div>
 
-        <div class="messages-container" id="messagesContainer">
-            <!-- 消息将在这里显示 -->
+        <!-- 选项卡 -->
+        <div class="tabs">
+            <button class="tab active" data-tab="all">全部消息</button>
+            <button class="tab" data-tab="danmu">弹幕 <span class="tab-badge" id="danmuBadge">0</span></button>
+            <button class="tab" data-tab="gift">礼物 <span class="tab-badge" id="giftBadge">0</span></button>
+            <button class="tab" data-tab="interact">互动 <span class="tab-badge" id="interactBadge">0</span></button>
+            <button class="tab" data-tab="system">系统 <span class="tab-badge" id="systemBadge">0</span></button>
+        </div>
+
+        <!-- 消息区域 -->
+        <div class="messages-section active" id="allMessages">
+            <div class="empty-state" id="allEmpty">暂无消息</div>
+        </div>
+
+        <div class="messages-section" id="danmuMessages">
+            <div class="empty-state" id="danmuEmpty">暂无弹幕消息</div>
+        </div>
+
+        <div class="messages-section" id="giftMessages">
+            <div class="empty-state" id="giftEmpty">暂无礼物消息</div>
+        </div>
+
+        <div class="messages-section" id="interactMessages">
+            <div class="empty-state" id="interactEmpty">暂无互动消息</div>
+        </div>
+
+        <div class="messages-section" id="systemMessages">
+            <div class="empty-state" id="systemEmpty">暂无系统消息</div>
         </div>
     </div>
 
@@ -239,6 +362,8 @@
                 this.messageCount = 0;
                 this.danmuCount = 0;
                 this.giftCount = 0;
+                this.interactCount = 0;
+                this.systemCount = 0;
                 this.userCount = 0;
                 this.users = new Set();
 
@@ -249,17 +374,56 @@
             initializeElements() {
                 this.statusIndicator = document.getElementById('statusIndicator');
                 this.statusText = document.getElementById('statusText');
-                this.messagesContainer = document.getElementById('messagesContainer');
+
+                // 消息容器
+                this.allMessagesContainer = document.getElementById('allMessages');
+                this.danmuMessagesContainer = document.getElementById('danmuMessages');
+                this.giftMessagesContainer = document.getElementById('giftMessages');
+                this.interactMessagesContainer = document.getElementById('interactMessages');
+                this.systemMessagesContainer = document.getElementById('systemMessages');
+
+                // 空状态提示
+                this.allEmpty = document.getElementById('allEmpty');
+                this.danmuEmpty = document.getElementById('danmuEmpty');
+                this.giftEmpty = document.getElementById('giftEmpty');
+                this.interactEmpty = document.getElementById('interactEmpty');
+                this.systemEmpty = document.getElementById('systemEmpty');
+
+                // 计数元素
                 this.messageCountElement = document.getElementById('messageCount');
                 this.danmuCountElement = document.getElementById('danmuCount');
                 this.giftCountElement = document.getElementById('giftCount');
                 this.userCountElement = document.getElementById('userCount');
+
+                // 选项卡徽章
+                this.danmuBadge = document.getElementById('danmuBadge');
+                this.giftBadge = document.getElementById('giftBadge');
+                this.interactBadge = document.getElementById('interactBadge');
+                this.systemBadge = document.getElementById('systemBadge');
             }
 
             bindEvents() {
                 document.getElementById('connectBtn').addEventListener('click', () => this.connect());
                 document.getElementById('disconnectBtn').addEventListener('click', () => this.disconnect());
                 document.getElementById('clearBtn').addEventListener('click', () => this.clearMessages());
+
+                // 选项卡切换
+                document.querySelectorAll('.tab').forEach(tab => {
+                    tab.addEventListener('click', (e) => {
+                        const tabId = e.target.getAttribute('data-tab');
+                        this.switchTab(tabId);
+                    });
+                });
+            }
+
+            switchTab(tabId) {
+                // 移除所有激活状态
+                document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
+                document.querySelectorAll('.messages-section').forEach(section => section.classList.remove('active'));
+
+                // 添加激活状态
+                document.querySelector(`[data-tab="${tabId}"]`).classList.add('active');
+                document.getElementById(`${tabId}Messages`).classList.add('active');
             }
 
             connect() {
@@ -320,16 +484,29 @@
                     case 'danmu':
                         this.danmuCount++;
                         this.danmuCountElement.textContent = this.danmuCount;
+                        this.danmuBadge.textContent = this.danmuCount;
                         this.addDanmuMessage(data);
                         break;
 
                     case 'gift':
+                    case 'combo_gift':
+                    case 'guard_buy':
+                    case 'super_chat':
+                    case 'super_chat_jpn':
+                    case 'red_pocket':
+                    case 'red_pocket_v2':
+                    case 'user_toast':
+                    case 'user_toast_v2':
                         this.giftCount++;
                         this.giftCountElement.textContent = this.giftCount;
+                        this.giftBadge.textContent = this.giftCount;
                         this.addGiftMessage(data);
                         break;
 
                     case 'interact':
+                    case 'like_click':
+                        this.interactCount++;
+                        this.interactBadge.textContent = this.interactCount;
                         if (data.user && !this.users.has(data.user)) {
                             this.users.add(data.user);
                             this.userCountElement.textContent = this.users.size;
@@ -338,25 +515,78 @@
                         break;
 
                     case 'live_start':
-                        this.addLiveStartMessage(data);
-                        break;
-
+                    case 'like_update':
+                    case 'watched_change':
+                    case 'online_rank_count':
+                    case 'popular_rank_changed':
+                    case 'red_pocket_winners':
+                    case 'super_chat_delete':
+                    case 'interaction_combo':
+                    case 'guardian_notice':
+                    case 'playurl_reload':
+                    case 'widget_gift_star':
+                    case 'hot_room_notify':
                     case 'system':
-                        this.addSystemMessage(data.message);
+                        this.systemCount++;
+                        this.systemBadge.textContent = this.systemCount;
+                        this.addSystemMessage(data);
                         break;
 
                     default:
+                        this.systemCount++;
+                        this.systemBadge.textContent = this.systemCount;
                         this.addUnknownMessage(data);
                 }
             }
 
-            addDanmuMessage(data) {
+            // 辅助函数：隐藏空状态提示
+            hideEmptyState(container, emptyElement) {
+                if (emptyElement.style.display !== 'none') {
+                    emptyElement.style.display = 'none';
+                }
+            }
+
+            // 辅助函数：创建消息元素
+            createMessageElement(data, className, content) {
                 const messageElement = document.createElement('div');
-                messageElement.className = 'message message-danmu';
+                messageElement.className = `message ${className}`;
+                messageElement.innerHTML = content;
+                return messageElement;
+            }
 
+            // 添加消息到所有容器
+            addMessageToContainers(messageElement, category) {
+                // 添加到全部消息容器
+                this.allMessagesContainer.appendChild(messageElement.cloneNode(true));
+                this.hideEmptyState(this.allMessagesContainer, this.allEmpty);
+
+                // 添加到对应分类容器
+                switch(category) {
+                    case 'danmu':
+                        this.danmuMessagesContainer.appendChild(messageElement);
+                        this.hideEmptyState(this.danmuMessagesContainer, this.danmuEmpty);
+                        break;
+                    case 'gift':
+                        this.giftMessagesContainer.appendChild(messageElement);
+                        this.hideEmptyState(this.giftMessagesContainer, this.giftEmpty);
+                        break;
+                    case 'interact':
+                        this.interactMessagesContainer.appendChild(messageElement);
+                        this.hideEmptyState(this.interactMessagesContainer, this.interactEmpty);
+                        break;
+                    case 'system':
+                        this.systemMessagesContainer.appendChild(messageElement);
+                        this.hideEmptyState(this.systemMessagesContainer, this.systemEmpty);
+                        break;
+                }
+
+                this.scrollToBottom();
+            }
+
+            // 弹幕消息
+            addDanmuMessage(data) {
                 const time = new Date(data.timestamp * 1000).toLocaleTimeString();
-
-                messageElement.innerHTML = `
+                const content = `
                     <div class="message-header">
                         <span>${time}</span>
                         <span>弹幕</span>
@@ -370,102 +600,328 @@
                     </div>
                 `;
 
-                this.messagesContainer.appendChild(messageElement);
-                this.scrollToBottom();
+                const messageElement = this.createMessageElement(data, 'message-danmu', content);
+                this.addMessageToContainers(messageElement, 'danmu');
             }
 
+            // 礼物消息
             addGiftMessage(data) {
-                const messageElement = document.createElement('div');
-                messageElement.className = 'message message-gift';
-
                 const time = new Date(data.timestamp * 1000).toLocaleTimeString();
-                const price = (data.total_coin / 1000).toFixed(2);
+                let content = '';
+                let className = 'message-gift';
 
-                messageElement.innerHTML = `
-                    <div class="message-header">
-                        <span>${time}</span>
-                        <span>礼物</span>
-                    </div>
-                    <div class="message-content">
-                        <span class="wealth-info">${data.wealth || ''}</span>
-                        <span class="medal-info">${data.medal || ''}</span>
-                        <span class="user-info">${data.user}</span>
-                        赠送了 ${data.gift_count} 个 ${data.gift_name} (${price}元)
-                    </div>
-                `;
+                switch(data.type) {
+                    case 'gift':
+                        const price = (data.total_coin / 1000).toFixed(2);
+                        content = `
+                            <div class="message-header">
+                                <span>${time}</span>
+                                <span>礼物</span>
+                            </div>
+                            <div class="message-content">
+                                <span class="wealth-info">${data.wealth || ''}</span>
+                                <span class="medal-info">${data.medal || ''}</span>
+                                <span class="user-info">${data.user}</span>
+                                赠送了 ${data.gift_count} 个 ${data.gift_name} (${price}元)
+                            </div>
+                        `;
+                        break;
 
-                this.messagesContainer.appendChild(messageElement);
-                this.scrollToBottom();
+                    case 'combo_gift':
+                        const comboPrice = (data.total_coin / 1000).toFixed(2);
+                        content = `
+                            <div class="message-header">
+                                <span>${time}</span>
+                                <span>连击礼物</span>
+                            </div>
+                            <div class="message-content">
+                                <span class="wealth-info">${data.wealth || ''}</span>
+                                <span class="medal-info">${data.medal || ''}</span>
+                                <span class="user-info">${data.user}</span>
+                                连续赠送 ${data.combo_num} 个 ${data.gift_name} (${comboPrice}元)
+                            </div>
+                        `;
+                        className = 'message-gift message-combo';
+                        break;
+
+                    case 'guard_buy':
+                        content = `
+                            <div class="message-header">
+                                <span>${time}</span>
+                                <span>上舰</span>
+                            </div>
+                            <div class="message-content">
+                                <span class="user-info">${data.user}</span>
+                                开通了 ${data.guard_name} x${data.guard_count}
+                            </div>
+                        `;
+                        className = 'message-gift message-guard';
+                        break;
+
+                    case 'super_chat':
+                    case 'super_chat_jpn':
+                        content = `
+                            <div class="message-header">
+                                <span>${time}</span>
+                                <span>醒目留言</span>
+                            </div>
+                            <div class="message-content">
+                                <span class="medal-info">${data.medal || ''}</span>
+                                <span class="user-info">${data.user}</span>
+                                💬 ${data.price}元 ${data.duration}秒
+                                <div class="superchat-message">${data.message}</div>
+                            </div>
+                        `;
+                        className = 'message-gift message-superchat';
+                        break;
+
+                    case 'red_pocket':
+                    case 'red_pocket_v2':
+                        content = `
+                            <div class="message-header">
+                                <span>${time}</span>
+                                <span>红包</span>
+                            </div>
+                            <div class="message-content">
+                                <span class="wealth-info">${data.wealth || ''}</span>
+                                <span class="medal-info">${data.medal || ''}</span>
+                                <span class="user-info">${data.user}</span>
+                                🔖 ${data.action} ${data.price}元
+                            </div>
+                        `;
+                        className = 'message-gift message-redpocket';
+                        break;
+
+                    case 'user_toast':
+                    case 'user_toast_v2':
+                        content = `
+                            <div class="message-header">
+                                <span>${time}</span>
+                                <span>大航海</span>
+                            </div>
+                            <div class="message-content">
+                                <span class="user-info">${data.user}</span>
+                                🚢 开通了 ${data.guard_name} (${data.price}元/${data.unit})
+                            </div>
+                        `;
+                        className = 'message-gift message-toast';
+                        break;
+                }
+
+                const messageElement = this.createMessageElement(data, className, content);
+                this.addMessageToContainers(messageElement, 'gift');
             }
 
+            // 互动消息
             addInteractMessage(data) {
-                const messageElement = document.createElement('div');
-                messageElement.className = 'message message-interact';
-
                 const time = new Date(data.timestamp * 1000).toLocaleTimeString();
+                let content = '';
+                let className = 'message-interact';
 
-                messageElement.innerHTML = `
-                    <div class="message-header">
-                        <span>${time}</span>
-                        <span>互动</span>
-                    </div>
-                    <div class="message-content">
-                        <span class="wealth-info">${data.wealth || ''}</span>
-                        <span class="medal-info">${data.medal || ''}</span>
-                        <span class="user-info">${data.user}</span>
-                        ${data.action}
-                    </div>
-                `;
+                if (data.type === 'like_click') {
+                    content = `
+                        <div class="message-header">
+                            <span>${time}</span>
+                            <span>点赞</span>
+                        </div>
+                        <div class="message-content">
+                            <span class="wealth-info">${data.wealth || ''}</span>
+                            <span class="medal-info">${data.medal || ''}</span>
+                            <span class="user-info">${data.user}</span>
+                            👍 ${data.like_text}
+                        </div>
+                    `;
+                    className = 'message-interact message-like';
+                } else {
+                    content = `
+                        <div class="message-header">
+                            <span>${time}</span>
+                            <span>互动</span>
+                        </div>
+                        <div class="message-content">
+                            <span class="wealth-info">${data.wealth || ''}</span>
+                            <span class="medal-info">${data.medal || ''}</span>
+                            <span class="user-info">${data.user}</span>
+                            ${data.action}
+                        </div>
+                    `;
+                }
 
-                this.messagesContainer.appendChild(messageElement);
-                this.scrollToBottom();
+                const messageElement = this.createMessageElement(data, className, content);
+                this.addMessageToContainers(messageElement, 'interact');
             }
 
-            addLiveStartMessage(data) {
-                const messageElement = document.createElement('div');
-                messageElement.className = 'message message-live_start';
-
+            // 系统消息
+            addSystemMessage(data) {
                 const time = new Date(data.timestamp * 1000).toLocaleTimeString();
+                let content = '';
 
-                messageElement.innerHTML = `
-                    <div class="message-header">
-                        <span>${time}</span>
-                        <span>直播开始</span>
-                    </div>
-                    <div class="message-content">
-                        🔴 直播开始！房间: ${data.roomid} | 平台: ${data.live_platform}
-                    </div>
-                `;
+                switch(data.type) {
+                    case 'live_start':
+                        content = `
+                            <div class="message-header">
+                                <span>${time}</span>
+                                <span>直播开始</span>
+                            </div>
+                            <div class="message-content">
+                                🔴 直播开始！房间: ${data.roomid} | 平台: ${data.live_platform}
+                            </div>
+                        `;
+                        break;
 
-                this.messagesContainer.appendChild(messageElement);
-                this.scrollToBottom();
-            }
+                    case 'like_update':
+                        content = `
+                            <div class="message-header">
+                                <span>${time}</span>
+                                <span>点赞更新</span>
+                            </div>
+                            <div class="message-content">
+                                👍 点赞数: ${data.click_count}
+                            </div>
+                        `;
+                        break;
 
-            addSystemMessage(message) {
-                const messageElement = document.createElement('div');
-                messageElement.className = 'message message-system';
+                    case 'watched_change':
+                        content = `
+                            <div class="message-header">
+                                <span>${time}</span>
+                                <span>观看人数</span>
+                            </div>
+                            <div class="message-content">
+                                👀 ${data.text_large} (${data.num}人)
+                            </div>
+                        `;
+                        break;
 
-                const time = new Date().toLocaleTimeString();
+                    case 'online_rank_count':
+                        content = `
+                            <div class="message-header">
+                                <span>${time}</span>
+                                <span>高能用户</span>
+                            </div>
+                            <div class="message-content">
+                                🧑🔢 高能用户数: ${data.count}
+                            </div>
+                        `;
+                        break;
 
-                messageElement.innerHTML = `
-                    <div class="message-header">
-                        <span>${time}</span>
-                        <span>系统</span>
-                    </div>
-                    <div class="message-content">${message}</div>
-                `;
+                    case 'popular_rank_changed':
+                        content = `
+                            <div class="message-header">
+                                <span>${time}</span>
+                                <span>排名变化</span>
+                            </div>
+                            <div class="message-content">
+                                🏆 ${data.on_rank_name}${data.rank_name} 第${data.rank}名
+                            </div>
+                        `;
+                        break;
 
-                this.messagesContainer.appendChild(messageElement);
-                this.scrollToBottom();
+                    case 'red_pocket_winners':
+                        const winnersText = data.winners.slice(0, 3).join('、');
+                        const moreText = data.winners.length > 3 ? `等${data.winners.length}人` : '';
+                        content = `
+                            <div class="message-header">
+                                <span>${time}</span>
+                                <span>红包中奖</span>
+                            </div>
+                            <div class="message-content">
+                                🧧 红包${data.lot_id} 共${data.total_num}个礼物
+                                <div class="winners-list">${winnersText}${moreText}</div>
+                            </div>
+                        `;
+                        break;
+
+                    case 'super_chat_delete':
+                        content = `
+                            <div class="message-header">
+                                <span>${time}</span>
+                                <span>SC删除</span>
+                            </div>
+                            <div class="message-content">
+                                🗑️ 删除了醒目留言: ${data.message}
+                            </div>
+                        `;
+                        break;
+
+                    case 'interaction_combo':
+                        content = `
+                            <div class="message-header">
+                                <span>${time}</span>
+                                <span>连续互动</span>
+                            </div>
+                            <div class="message-content">
+                                ${data.message}
+                            </div>
+                        `;
+                        break;
+
+                    case 'guardian_notice':
+                        content = `
+                            <div class="message-header">
+                                <span>${time}</span>
+                                <span>星球守护者</span>
+                            </div>
+                            <div class="message-content">
+                                🌎 ${data.message}
+                            </div>
+                        `;
+                        break;
+
+                    case 'playurl_reload':
+                        content = `
+                            <div class="message-header">
+                                <span>${time}</span>
+                                <span>视频信息</span>
+                            </div>
+                            <div class="message-content">
+                                📺 房间${data.room_id} | 协议: ${data.protocols.join(' | ')}
+                            </div>
+                        `;
+                        break;
+
+                    case 'widget_gift_star':
+                        content = `
+                            <div class="message-header">
+                                <span>${time}</span>
+                                <span>礼物星球</span>
+                            </div>
+                            <div class="message-content">
+                                🌟 进度: ${data.progress_list.join('、')} | 状态: ${data.finished ? '已完成' : '未完成'}
+                            </div>
+                        `;
+                        break;
+
+                    case 'hot_room_notify':
+                        content = `
+                            <div class="message-header">
+                                <span>${time}</span>
+                                <span>热门房间</span>
+                            </div>
+                            <div class="message-content">
+                                ${data.message}
+                            </div>
+                        `;
+                        break;
+
+                    case 'system':
+                        content = `
+                            <div class="message-header">
+                                <span>${time}</span>
+                                <span>系统</span>
+                            </div>
+                            <div class="message-content">${data.message}</div>
+                        `;
+                        break;
+                }
+
+                const messageElement = this.createMessageElement(data, 'message-system', content);
+                this.addMessageToContainers(messageElement, 'system');
             }
 
             addUnknownMessage(data) {
-                const messageElement = document.createElement('div');
-                messageElement.className = 'message';
-
                 const time = new Date(data.timestamp * 1000).toLocaleTimeString();
-
-                messageElement.innerHTML = `
+                const content = `
                     <div class="message-header">
                         <span>${time}</span>
                         <span>未知消息</span>
@@ -475,22 +931,49 @@
                     </div>
                 `;
 
-                this.messagesContainer.appendChild(messageElement);
-                this.scrollToBottom();
+                const messageElement = this.createMessageElement(data, 'message-system', content);
+                this.addMessageToContainers(messageElement, 'system');
             }
 
             clearMessages() {
-                this.messagesContainer.innerHTML = '';
+                // 清空所有消息容器
+                this.allMessagesContainer.innerHTML = '<div class="empty-state" id="allEmpty">暂无消息</div>';
+                this.danmuMessagesContainer.innerHTML = '<div class="empty-state" id="danmuEmpty">暂无弹幕消息</div>';
+                this.giftMessagesContainer.innerHTML = '<div class="empty-state" id="giftEmpty">暂无礼物消息</div>';
+                this.interactMessagesContainer.innerHTML = '<div class="empty-state" id="interactEmpty">暂无互动消息</div>';
+                this.systemMessagesContainer.innerHTML = '<div class="empty-state" id="systemEmpty">暂无系统消息</div>';
+
+                // 重置空状态元素引用
+                this.allEmpty = document.getElementById('allEmpty');
+                this.danmuEmpty = document.getElementById('danmuEmpty');
+                this.giftEmpty = document.getElementById('giftEmpty');
+                this.interactEmpty = document.getElementById('interactEmpty');
+                this.systemEmpty = document.getElementById('systemEmpty');
+
+                // 重置计数
                 this.messageCount = 0;
                 this.danmuCount = 0;
                 this.giftCount = 0;
+                this.interactCount = 0;
+                this.systemCount = 0;
                 this.messageCountElement.textContent = '0';
                 this.danmuCountElement.textContent = '0';
                 this.giftCountElement.textContent = '0';
+                this.danmuBadge.textContent = '0';
+                this.giftBadge.textContent = '0';
+                this.interactBadge.textContent = '0';
+                this.systemBadge.textContent = '0';
+
+                // 重置用户计数
+                this.users.clear();
+                this.userCountElement.textContent = '0';
             }
 
             scrollToBottom() {
-                this.messagesContainer.scrollTop = this.messagesContainer.scrollHeight;
+                const activeSection = document.querySelector('.messages-section.active');
+                if (activeSection) {
+                    activeSection.scrollTop = activeSection.scrollHeight;
+                }
             }
 
             updateStatus(status, text) {
