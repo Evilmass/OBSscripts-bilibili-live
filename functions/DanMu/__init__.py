@@ -1,4 +1,5 @@
 import asyncio
+import bisect
 import datetime
 import hashlib
 import json
@@ -11,7 +12,7 @@ import zlib
 from collections import deque
 from collections.abc import Callable
 from pathlib import Path
-from typing import Set, Optional, Union, Dict, Any
+from typing import Set, Optional, Union, Dict, Any, OrderedDict
 
 from PIL import Image
 
@@ -23,6 +24,90 @@ from function.tools.EncodingConversion.DanmuProtoDecoder import DanmuProtoDecode
 from function.tools.ConfigControl.BilibiliUserConfigManager import BilibiliUserConfigManager
 
 import websockets
+
+
+class OptimizedMessageDeduplication:
+    """优化的消息去重类"""
+
+    def __init__(self, max_size: int = 1000, ttl_seconds: int = 5):
+        """
+        Args:
+            max_size: 最大存储数量
+            ttl_seconds: 消息存活时间（秒），None表示不过期
+        """
+        self.max_size = max_size
+        self.ttl_seconds = ttl_seconds
+        # 使用OrderedDict同时维护顺序和快速查找
+        self.message_store = OrderedDict()  # {hash: timestamp}
+
+    def add(self, message: str) -> bool:
+        """添加消息，返回True如果是新消息"""
+        message_hash = self._get_hash(message)
+        current_time = time.time()
+
+        # 清理过期消息
+        if self.ttl_seconds:
+            self._cleanup_expired(current_time)
+
+        # 检查是否重复
+        if message_hash in self.message_store:
+            # 更新访问时间
+            self.message_store.move_to_end(message_hash)
+            return False
+
+        # 添加新消息
+        self.message_store[message_hash] = current_time
+
+        # 限制大小
+        if len(self.message_store) > self.max_size:
+            self.message_store.popitem(last=False)
+
+        return True
+
+    def contains(self, message: str) -> bool:
+        """检查消息是否重复"""
+        message_hash = self._get_hash(message)
+
+        if self.ttl_seconds:
+            self._cleanup_expired(time.time())
+
+        return message_hash in self.message_store
+
+    def _get_hash(self, message: str) -> str:
+        """获取消息哈希（使用更快的哈希算法）"""
+        return hashlib.md5(message.encode()).hexdigest()
+        # 或者使用更快的：return hashlib.sha1(message.encode()).hexdigest()
+
+    def _cleanup_expired(self, current_time: float):
+        """清理过期消息"""
+        expired_hashes = []
+
+        for msg_hash, timestamp in self.message_store.items():
+            if current_time - timestamp > self.ttl_seconds:
+                expired_hashes.append(msg_hash)
+            else:
+                break  # 由于是有序的，后面的都不会过期
+
+        for msg_hash in expired_hashes:
+            del self.message_store[msg_hash]
+
+    def size(self) -> int:
+        """返回当前消息数量"""
+        if self.ttl_seconds:
+            self._cleanup_expired(time.time())
+        return len(self.message_store)
+
+    def clear(self):
+        """清空所有消息"""
+        self.message_store.clear()
+
+    def get_memory_usage(self) -> int:
+        """估算内存使用（字节）"""
+        # 每个条目大约：哈希(32字节) + 时间戳(8字节) + 字典开销
+        return len(self.message_store) * 50  # 近似值
+
+o_m_d = OptimizedMessageDeduplication(500, 6)
+
 
 
 class DanmuWebSocketServer:
@@ -144,7 +229,6 @@ class DanmuWebSocketServer:
             self.server.close()
             if self.server_loop and self.server_loop.is_running():
                 self.server_loop.stop()
-
 
 # 全局 WebSocket 服务器实例
 danmu_ws_server = DanmuWebSocketServer()
@@ -485,6 +569,7 @@ if __name__ == "__main__":
     """换行显示"""
     is_tag_administrator = False
     """是否标记管理员，is_admin不受影响"""
+    is_timestamp_display = False
 
     b_a_g = BilibiliApiGeneric(Headers)
     get_room_base = b_a_g.get_room_base_info(DataInput.room_id)
@@ -541,7 +626,7 @@ if __name__ == "__main__":
     ws_thread = threading.Thread(target=danmu_ws_server.start_server, daemon=True)
     ws_thread.start()
     print("WebSocket 服务器启动中...")
-    time.sleep(2)  # 等待服务器启动
+    time.sleep(1)  # 等待服务器启动
 
 
     dm = Danmu(Headers)
@@ -942,6 +1027,7 @@ if __name__ == "__main__":
                 "isAdmin": is_admin,
                 "isFanGroup": is_fan_group,
                 "lineBreakDisplay": line_break_display,
+                "isTimestampDisplay": is_timestamp_display,
 
                 "user": user_name,
                 "medal": f'【{fan_medal_name}|{fan_medal_level}】' if fan_medal_name else None,
@@ -978,9 +1064,126 @@ if __name__ == "__main__":
                 "timestamp": time.time()
             })
 
+        elif content['cmd'] == "USER_TOAST_MSG":
+            contentdata = content['data']
+
+            # 用户信息
+            username = contentdata['username']
+            uid = contentdata['uid']
+            guard_level = contentdata['guard_level']
+            role_name = contentdata['role_name']
+            price = contentdata['price'] / 1000  # 转换为元
+            unit = contentdata['unit']
+
+            # 格式化大航海等级显示
+            guard_map = {1: "总督", 2: "提督", 3: "舰长"}
+            guard_name = guard_map.get(guard_level, f"未知({guard_level})")
+
+            print(f'🚢大航海：{username}({uid}) 开通{guard_name} {price}元/{unit}')
+            # 转发到 WebSocket
+            danmu_ws_server.send_danmu_message({
+                "type": "user_toast",
+                "user": username,
+                "uid": uid,
+                "guard_level": guard_level,
+                "guard_name": guard_name,
+                "price": price,
+                "unit": unit,
+                "message": f"{username}开通{guard_name} {price}元/{unit}",
+                "timestamp": time.time()
+            })
+
+        elif content['cmd'] == "USER_TOAST_MSG_V2":
+            u_name = ""
+            u_id = ""
+            user_face_picture = ""
+            face_picture_x = ""
+            face_picture_y = ""
+            timestamp = ""
+            message_data = ""
+            privilege_level = ""
+            fleet_title = ""
+            fleet_badge = ""
+            membership_header_color = ""
+            identity_title = ""
+
+            contentdata = content['data']
+            u_name = contentdata["sender_uinfo"]["base"]["name"]
+            u_id = contentdata["sender_uinfo"]["uid"]
+            user_card = b_a_g.get_bilibili_user_card(u_id, True)
+            user_face_picture = f'./img/face/{re.split("/", user_card["data"]["card"]["face"])[-1]}'
+            if not os.path.exists(user_face_picture):
+                # 先检查返回值
+                result = url2pillow_image(user_card["data"]["card"]["face"], Headers)
+                if result and "PilImg" in result and result["PilImg"] is not None:
+                    pillow_img = result["PilImg"]
+                    pillow_img.save(user_face_picture)
+                    face_picture_x, face_picture_y = pillow_img.size
+                else:
+                    print(f"无法获取图片: {result['Message']}")
+            else:
+                pillow_img = Image.open(user_face_picture)
+                face_picture_x, face_picture_y = pillow_img.size
+            if face_picture_size:
+                face_picture_x, face_picture_y = face_picture_size
+            timestamp = content["send_time"]
+            message_data = contentdata["toast_msg"]
+            privilege_level = contentdata["guard_info"]["guard_level"]
+            guard_dict[u_id] = privilege_level
+            identity_title = "member"  # 舰长
+            fleet_title = {'1': '总督','2': '提督','3': '舰长'}[str(privilege_level)]
+            if is_medal_other_display:
+                fleet_badge = f'https://blc.huixinghao.cn/static/img/icons/guard-level-{privilege_level}.png'
+            fleet_badge_path = f"./img/fleet/{fleet_title}.png"
+            if not os.path.exists(fleet_badge_path):
+                pillow_img = url2pillow_image(fleet_badge, Headers)["PilImg"]
+                pillow_img.save(fleet_badge_path)
+            fleet_badge = fleet_badge_path
+            membership_header_color = contentdata["option"]["color"]
+
+
+            # 用户信息
+            username = contentdata['sender_uinfo']['base']['name']
+            uid = contentdata['sender_uinfo']['uid']
+            guard_level = contentdata['guard_info']['guard_level']
+            role_name = contentdata['guard_info']['role_name']
+            price = contentdata['pay_info']['price'] / 1000  # 转换为元
+            unit = contentdata['pay_info']['unit']
+
+            # 格式化大航海等级显示
+            guard_map = {1: "总督", 2: "提督", 3: "舰长"}
+            guard_name = guard_map.get(guard_level, f"未知({guard_level})")
+
+            print(f'🚢大航海：{username}({uid}) 开通{guard_name} {price}元/{unit}')
+            # 转发到 WebSocket
+            danmu_ws_server.send_danmu_message({
+                "type": "user_toast_v2",
+                "uName": u_name,
+                "uId": u_id,
+                "facePicture": user_face_picture,
+                "facePictureX": face_picture_x,
+                "facePictureY": face_picture_y,
+                "timestamp": timestamp,
+                "messageData": message_data,
+                "fleetBadge": fleet_badge,
+                "membershipHeaderColor": membership_header_color,
+                "identityTitle": identity_title,
+                "privilegeLevel": privilege_level,
+                "fleetTitle": fleet_title,
+
+                "user": username,
+                "uid": uid,
+                "guard_level": guard_level,
+                "guard_name": guard_name,
+                "price": price,
+                "unit": unit,
+                "message": f"{username}开通{guard_name} {price}元/{unit}",
+            })
+
         elif content['cmd'] == "GUARD_BUY":
             # 上舰通知 (GUARD_BUY)
             contentdata = content['data']
+
             tfo = f"🚢上舰：\t{contentdata['username']}\t购买{contentdata['num']}个\t【{contentdata['gift_name']}】"
             print(f"{tfo}")
             pass
@@ -992,7 +1195,6 @@ if __name__ == "__main__":
                 "guard_count": contentdata['num'],
                 "price": contentdata['price'],
                 "message": tfo,
-                "timestamp": time.time()
             })
 
         elif content['cmd'] == "INTERACT_WORD_V2":
@@ -1344,9 +1546,147 @@ if __name__ == "__main__":
             })
 
         elif content['cmd'] == "SEND_GIFT":
+            u_name = ""
+            u_id = ""
+            user_face_picture = ""
+            face_picture_x = ""
+            face_picture_y = ""
+            timestamp = ""
+            price = ""
+            price_level = ""
+            message_primary_color = ""
+            message_secondary_color = ""
+            message_header_color = ""
+            message_author_name_color = ""
+            message_timestamp_color = ""
+            message_color = ""
+            message_data = ""
+            show_only_header = False
+
+            def get_color_by_amount(amount):
+                """
+                根据金额获取对应的颜色信息
+
+                参数:
+                    amount: 金额数值
+
+                返回:
+                    字典格式的颜色信息，包含color_name、css_color、primary_color和secondary_color
+                """
+                coin_color = {
+                    0: {
+                        'color_name': '蓝色',
+                        'css_color': '#0000FF',
+                        'primary_color': 'rgba(0, 123, 255, 1)',  # 较亮的蓝色
+                        'secondary_color': 'rgba(0, 86, 179, 1)'  # 较暗的蓝色
+                    },
+                    30: {
+                        'color_name': '浅蓝色',
+                        'css_color': '#87CEEB',
+                        'primary_color': 'rgba(135, 206, 235, 1)',  # 较亮的浅蓝色
+                        'secondary_color': 'rgba(102, 178, 214, 1)'  # 较暗的浅蓝色
+                    },
+                    50: {
+                        'color_name': '绿色',
+                        'css_color': '#008000',
+                        'primary_color': 'rgba(76, 175, 80, 1)',  # 较亮的绿色
+                        'secondary_color': 'rgba(56, 142, 60, 1)'  # 较暗的绿色
+                    },
+                    100: {
+                        'color_name': '黄色',
+                        'css_color': '#FFFF00',
+                        'primary_color': 'rgba(255, 235, 59, 1)',  # 较亮的黄色
+                        'secondary_color': 'rgba(253, 216, 53, 1)'  # 较暗的黄色
+                    },
+                    500: {
+                        'color_name': '橘色',
+                        'css_color': '#FFA500',
+                        'primary_color': 'rgba(255, 152, 0, 1)',  # 较亮的橘色
+                        'secondary_color': 'rgba(245, 124, 0, 1)'  # 较暗的橘色
+                    },
+                    1000: {
+                        'color_name': '洋红色',
+                        'css_color': '#FF00FF',
+                        'primary_color': 'rgba(233, 30, 99, 1)',  # 较亮的洋红色
+                        'secondary_color': 'rgba(194, 24, 91, 1)'  # 较暗的洋红色
+                    },
+                    2000: {
+                        'color_name': '红色',
+                        'css_color': '#FF0000',
+                        'primary_color': 'rgba(244, 67, 54, 1)',  # 较亮的红色
+                        'secondary_color': 'rgba(229, 57, 53, 1)'  # 较暗的红色
+                    }
+                }
+                thresholds = sorted(coin_color.keys())
+                matching_threshold = 0
+
+                for threshold in thresholds:
+                    if amount >= threshold:
+                        matching_threshold = threshold
+                    else:
+                        break
+
+                return coin_color[matching_threshold], matching_threshold
+
             # 送礼 (SEND_GIFT)
             contentdata = content['data']
+            u_name = contentdata['uname']
 
+            u_id = contentdata['uid']
+
+            user_face_picture = f'./img/face/{re.split("/", contentdata["sender_uinfo"]["base"]["face"])[-1]}'
+            if not os.path.exists(user_face_picture):
+                # 先检查返回值
+                result = url2pillow_image(contentdata["sender_uinfo"]["base"]["face"], Headers)
+                if result and "PilImg" in result and result["PilImg"] is not None:
+                    pillow_img = result["PilImg"]
+                    pillow_img.save(user_face_picture)
+                    face_picture_x, face_picture_y = pillow_img.size
+                else:
+                    print(f"无法获取图片: {result['Message']}")
+            else:
+                pillow_img = Image.open(user_face_picture)
+                face_picture_x, face_picture_y = pillow_img.size
+            if face_picture_size:
+                face_picture_x, face_picture_y = face_picture_size
+
+            timestamp = contentdata["timestamp"]
+
+            price = contentdata['total_coin'] / 1000
+
+            message_bg_color, price_level = get_color_by_amount(int(price))
+
+            message_primary_color = message_bg_color["primary_color"]
+
+            message_secondary_color = message_bg_color["secondary_color"]
+
+            message_header_color = 'rgba(0,0,0,1)'
+
+            message_author_name_color = 'rgba(0,0,0,0.541176)'
+
+            message_timestamp_color = 'rgba(0,0,0,0.501961)'
+
+            message_color = 'rgba(0,0,0,1)'
+
+            message_data = ""
+            if contentdata['batch_combo_send']:  # 盲盒
+                message_data += contentdata['batch_combo_send']['action'] # 投喂
+                if contentdata['batch_combo_send']['blind_gift']:
+                    contentdata_bcsb_g = contentdata['batch_combo_send']['blind_gift']
+                    message_data += f"\t【{contentdata_bcsb_g['original_gift_name']}】" # 盲盒名称
+                    message_data += f"{contentdata_bcsb_g['gift_action']}" # 爆出
+                    actual_amount = contentdata_bcsb_g['gift_tip_price'] * contentdata['num'] / 1000 # 实际金额
+                    consumption_amount = contentdata['total_coin'] / 1000 # 消费金额
+                    profit_and_loss = f"\t({round((actual_amount - consumption_amount), 3)}￥)"  # 盲盒盈亏
+                    message_data += f"《{contentdata['batch_combo_send']['gift_name']}》X {contentdata['num']}个\t{profit_and_loss}"
+                else:
+                    message_data += f"《{contentdata['batch_combo_send']['gift_name']}》X {contentdata['num']}个"
+            else:
+                message_data += f"{contentdata['action']}《{contentdata['giftName']}》X {contentdata['num']}个"
+
+            show_only_header = False
+
+            # -=-=--=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=--=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
             ufo = contentdata['uname']
             mfo = ""
             if contentdata['medal_info']['medal_name']:
@@ -1361,9 +1701,10 @@ if __name__ == "__main__":
                 if contentdata['batch_combo_send']['blind_gift']:
                     contentdata_bcsb_g = contentdata['batch_combo_send']['blind_gift']
                     tfo += f"\t【{contentdata_bcsb_g['original_gift_name']}】{contentdata_bcsb_g['gift_action']}"
-                    coin = f"{contentdata_bcsb_g['gift_tip_price'] / 1000}￥\t{(contentdata_bcsb_g['gift_tip_price'] - contentdata['total_coin']) / 1000}￥"
+                    coin = f"{contentdata_bcsb_g['gift_tip_price'] * contentdata['num'] / 1000}￥\t{(contentdata_bcsb_g['gift_tip_price'] * contentdata['num'] - contentdata['total_coin']) / 1000}￥"
                 else:
-                    coin = f"{contentdata['total_coin'] / 1000}￥"
+                    coin = f"{contentdata['total_coin'] * contentdata['num'] / 1000}￥"
+
                 tfo += f"{contentdata['num']}个《{contentdata['batch_combo_send']['gift_name']}》\t{coin}"
             else:
                 tfo += f"{contentdata['action']}{contentdata['num']}个《{contentdata['giftName']}》"
@@ -1371,14 +1712,30 @@ if __name__ == "__main__":
             # 转发到 WebSocket
             danmu_ws_server.send_danmu_message({
                 "type": "gift",
+                "uName": u_name,
+                "uId": u_id,
+                "facePicture": user_face_picture,
+                "facePictureX": face_picture_x,
+                "facePictureY": face_picture_y,
+                "timestamp": timestamp,
+                "price": price,
+                "priceLevel": price_level,
+                "messagePrimaryColor": message_primary_color,
+                "messageSecondaryColor": message_secondary_color,
+                "messageHeaderColor": message_header_color,
+                "messageAuthorNameColor": message_author_name_color,
+                "messageTimestampColor": message_timestamp_color,
+                "messageColor": message_color,
+                "messageData": message_data,
+                "showOnlyHeader": show_only_header,
+
                 "user": ufo,
                 "medal": mfo,
                 "wealth": wfo,
                 "gift_name": contentdata.get('giftName', ''),
                 "gift_count": contentdata['num'],
                 "total_coin": contentdata['total_coin'],
-                "message": tfo,
-                "timestamp": time.time()
+                "message": tfo
             })
 
         elif content['cmd'] == "SUPER_CHAT_MESSAGE_JPN":
@@ -1407,64 +1764,6 @@ if __name__ == "__main__":
                 "price": price,
                 "message": message,
                 "duration": duration,
-                "timestamp": time.time()
-            })
-
-        elif content['cmd'] == "USER_TOAST_MSG":
-            contentdata = content['data']
-
-            # 用户信息
-            username = contentdata['username']
-            uid = contentdata['uid']
-            guard_level = contentdata['guard_level']
-            role_name = contentdata['role_name']
-            price = contentdata['price'] / 1000  # 转换为元
-            unit = contentdata['unit']
-
-            # 格式化大航海等级显示
-            guard_map = {1: "总督", 2: "提督", 3: "舰长"}
-            guard_name = guard_map.get(guard_level, f"未知({guard_level})")
-
-            print(f'🚢大航海：{username}({uid}) 开通{guard_name} {price}元/{unit}')
-            # 转发到 WebSocket
-            danmu_ws_server.send_danmu_message({
-                "type": "user_toast",
-                "user": username,
-                "uid": uid,
-                "guard_level": guard_level,
-                "guard_name": guard_name,
-                "price": price,
-                "unit": unit,
-                "message": f"{username}开通{guard_name} {price}元/{unit}",
-                "timestamp": time.time()
-            })
-
-        elif content['cmd'] == "USER_TOAST_MSG_V2":
-            contentdata = content['data']
-
-            # 用户信息
-            username = contentdata['sender_uinfo']['base']['name']
-            uid = contentdata['sender_uinfo']['uid']
-            guard_level = contentdata['guard_info']['guard_level']
-            role_name = contentdata['guard_info']['role_name']
-            price = contentdata['pay_info']['price'] / 1000  # 转换为元
-            unit = contentdata['pay_info']['unit']
-
-            # 格式化大航海等级显示
-            guard_map = {1: "总督", 2: "提督", 3: "舰长"}
-            guard_name = guard_map.get(guard_level, f"未知({guard_level})")
-
-            print(f'🚢大航海：{username}({uid}) 开通{guard_name} {price}元/{unit}')
-            # 转发到 WebSocket
-            danmu_ws_server.send_danmu_message({
-                "type": "user_toast_v2",
-                "user": username,
-                "uid": uid,
-                "guard_level": guard_level,
-                "guard_name": guard_name,
-                "price": price,
-                "unit": unit,
-                "message": f"{username}开通{guard_name} {price}元/{unit}",
                 "timestamp": time.time()
             })
 
