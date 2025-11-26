@@ -1,4 +1,4 @@
-# Windows10+
+# Windows 10+
 ## 环境配置
 ### 配置Python
 #### 安装python
