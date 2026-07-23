@@ -38,6 +38,7 @@ from urllib.parse import quote, unquote, parse_qs, urlparse
 from pathlib import Path
 import socket
 import urllib.request
+import webbrowser
 from urllib.error import URLError
 
 import urllib3
@@ -55,7 +56,7 @@ from PIL import Image, ImageOps
 sys.path.insert(0, f'{os.path.dirname(os.path.abspath(__file__))}\\bilibili-live')
 
 
-script_version = "0.1.6"
+script_version = "0.1.8"
 """脚本版本"""
 
 # 全局变量
@@ -2797,6 +2798,7 @@ class BilibiliApiMaster:
         self.cookie = cookie
         self.csrf = self.cookies.get("bili_jct", "")
         self.sslVerification = ssl_verification
+        self._room_id = None
 
     def get_nav_info(self) -> Dict[str, Any]:
         """
@@ -2851,24 +2853,89 @@ class BilibiliApiMaster:
 
     def get_room_highlight_state(self):
         """
-        获取直播间号
-        @return:
-        """
-        api = "https://api.live.bilibili.com/xlive/app-blink/v1/highlight/getRoomHighlightState"
-        headers = self.headers
-        room_id = requests.get(verify=self.sslVerification, url = api, headers=headers).json()["data"]["room_id"]
-        return room_id
+        获取直播间号。
 
-    def get_room_news(self) -> str:
-        # 获取直播公告
-        headers = self.headers
+        优先使用按登录 UID 查询且当前可用的 ``getRoomInfoOld`` 接口。
+        ``getRoomHighlightState`` 在部分账号或风控环境下会返回 HTTP
+        412，且响应中没有 ``data`` 字段，因此只作为兼容回退。
+
+        Returns:
+            int: 直播间号
+
+        Raises:
+            RuntimeError: 两个接口都无法返回有效直播间号
+        """
+        if self._room_id:
+            return self._room_id
+
+        errors = []
+        requests_to_try = (
+            (
+                "https://api.live.bilibili.com/room/v1/Room/getRoomInfoOld",
+                {"mid": self.cookies.get("DedeUserID")},
+                "roomid",
+            ),
+            (
+                "https://api.live.bilibili.com/xlive/app-blink/v1/highlight/getRoomHighlightState",
+                None,
+                "room_id",
+            ),
+        )
+
+        for api, params, room_id_key in requests_to_try:
+            try:
+                response = requests.get(
+                    verify=self.sslVerification,
+                    url=api,
+                    headers=self.headers,
+                    params=params,
+                    timeout=10,
+                )
+                response.raise_for_status()
+                result = response.json()
+                data = result.get("data")
+                room_id = data.get(room_id_key) if isinstance(data, dict) else None
+                if result.get("code") == 0 and room_id:
+                    self._room_id = int(room_id)
+                    return self._room_id
+                errors.append(
+                    f"{api}: code={result.get('code')}, "
+                    f"message={result.get('message', '响应缺少直播间号')}"
+                )
+            except (requests.exceptions.RequestException, ValueError, TypeError) as e:
+                errors.append(f"{api}: {e}")
+
+        raise RuntimeError(f"无法获取直播间号：{'; '.join(errors)}")
+
+    def get_room_news(self, room_id: Optional[int] = None) -> str:
+        """获取直播公告；接口临时异常时返回空字符串，避免阻断 OBS 面板加载。"""
         api = "https://api.live.bilibili.com/xlive/app-blink/v1/index/getRoomNews"
-        params = {
-            'room_id': self.get_room_highlight_state(),
-            'uid': cookie2dict(self.headers["cookie"])["DedeUserID"]
-        }
-        room_news = requests.get(verify=self.sslVerification, url = api, headers=headers, params=params).json()
-        return room_news["data"]["content"]
+        try:
+            params = {
+                "room_id": room_id or self.get_room_highlight_state(),
+                "uid": self.cookies["DedeUserID"],
+            }
+            response = requests.get(
+                verify=self.sslVerification,
+                url=api,
+                headers=self.headers,
+                params=params,
+                timeout=10,
+            )
+            response.raise_for_status()
+            result = response.json()
+            data = result.get("data")
+            if result.get("code") != 0 or not isinstance(data, dict):
+                log_save(
+                    1,
+                    f"获取直播间公告失败：code={result.get('code')}，"
+                    f"message={result.get('message', '响应缺少 data 字段')}",
+                )
+                return ""
+            return data.get("content", "")
+        except (requests.exceptions.RequestException, ValueError, KeyError, TypeError, RuntimeError) as e:
+            log_save(1, f"获取直播间公告失败，已使用空公告继续加载：{e}")
+            return ""
 
     def get_reserve_list(self) -> List[Dict[str, Any]]:
         """
@@ -2896,9 +2963,8 @@ class BilibiliApiMaster:
                 "stat": int              # 状态码
             }
 
-        Raises:
-            RequestException: 网络请求失败
-            ValueError: API返回错误或数据结构异常
+        预约数据不是 OBS 面板加载的必要条件。网络、认证或数据格式
+        异常时记录原因并返回空列表，避免可选功能阻断整个脚本。
         """
         api_url = "https://api.live.bilibili.com/xlive/app-ucenter/v2/schedule/GetReserveList"
 
@@ -2910,22 +2976,32 @@ class BilibiliApiMaster:
             # 解析JSON响应
             data = response.json()
 
-            # 验证API响应
+            # 验证API响应。-101 通常表示登录 Cookie 已过期；预约
+            # 列表属于可选数据，因此不应在这里中断脚本初始化。
             if data.get("code") != 0:
-                error_msg = data.get("message")
-                raise ValueError(f"API错误: {error_msg}")
+                log_save(
+                    1,
+                    f"获取预约列表失败：code={data.get('code')}，"
+                    f"message={data.get('message', '未知错误')}，已按空列表继续加载",
+                )
+                return []
 
             # 提取预约列表
-            reserve_list = data.get("data").get("list") if data.get("data").get("list") else []
+            response_data = data.get("data")
+            reserve_list = response_data.get("list") if isinstance(response_data, dict) else []
+            reserve_list = reserve_list or []
             if not isinstance(reserve_list, list):
-                raise ValueError("返回数据格式异常，缺少预约列表")
+                log_save(1, "预约列表响应格式异常，已按空列表继续加载")
+                return []
 
             return reserve_list
 
         except requests.exceptions.RequestException as e:
-            raise requests.exceptions.RequestException(f"获取预约列表失败: {e}") from e
+            log_save(1, f"获取预约列表网络请求失败，已按空列表继续加载：{e}")
+            return []
         except (ValueError, KeyError, TypeError) as e:
-            raise ValueError(f"数据处理失败: {e}") from e
+            log_save(1, f"处理预约列表失败，已按空列表继续加载：{e}")
+            return []
 
     def get_live_stream_info(self) -> Dict[str, Any]:
         """
@@ -3548,10 +3624,19 @@ def script_defaults(settings):  # 设置其默认值
             ).get_nav_info()
             all_uname4uid[uid] = b_a_g.get_bilibili_user_card(uid)['basic_info']['name']
     log_save(0, f"║║载入账号字典：{all_uname4uid}")
+    default_uid = b_u_l_c.get_users()[0]
+    default_nav_info = all_is_login4uid.get(default_uid) or {}
+    login_valid = bool(default_nav_info.get("isLogin"))
+    """默认账号的 Cookie 是否仍通过 B 站登录校验"""
     # 获取 '登录用户' 的昵称
     uname = all_uname4uid[b_u_l_c.get_users()[0]] if b_u_l_c.get_cookies() else None
     """登录用户的昵称，没有登录则为None"""
-    log_save(0, f"║║用户：{(uname + ' 已登录') if b_u_l_c.get_cookies() else '⚠️未登录账号'}")
+    login_status_text = (
+        f"{uname} 已登录"
+        if login_valid
+        else ("登录已失效，请重新扫码登录" if b_u_l_c.get_cookies() else "未登录，请扫码登录")
+    )
+    log_save(0, f"║║用户：{login_status_text}")
     # 获取 '登录用户' 对应的直播间基础信息
     room_info_old = b_a_g.get_room_info_old(int(b_u_l_c.get_users()[0])) if b_u_l_c.get_cookies() else None
     """直播间基础信息"""
@@ -3585,7 +3670,7 @@ def script_defaults(settings):  # 设置其默认值
     """常用直播间标题】{'0': 't1', '1': 't2', '2': 't3',}"""
     log_save(0, f"║║登录账户 的 常用直播间标题：{(common_title4number if room_status else f'⚠️无直播间') if b_u_l_c.get_cookies() else f'⚠️未登录账号'}")
     # 获取 直播间公告
-    room_news = (b_a_m.get_room_news() if room_status else None) if b_u_l_c.get_cookies() else None
+    room_news = b_a_m.get_room_news(room_id) if room_status and login_valid else ""
     """直播间公告"""
     log_save(0, f"║║登录账户 的 直播间公告：{(room_news if room_status else f'⚠️无直播间') if b_u_l_c.get_cookies() else f'⚠️未登录账号'}")
     # 获取 '登录用户' 直播间的分区
@@ -3617,7 +3702,7 @@ def script_defaults(settings):  # 设置其默认值
     """登录用户的直播状态】0：未开播 1：直播中"""
     log_save(0, f"║║登录账户 的 直播状态：{(('直播中' if live_status else '未开播') if room_status else '⚠️无直播间') if b_u_l_c.get_cookies() else f'⚠️未登录账号'}")
     # 登录用户的直播预约列表信息
-    reserve_list = (b_a_m.get_reserve_list() if room_status else None) if b_u_l_c.get_cookies() else None
+    reserve_list = b_a_m.get_reserve_list() if room_status and login_valid else []
     """获取 '登录用户' 的 直播预约列表信息"""
     log_save(0, f"║║登录账户 的 直播预约列表信息：{(reserve_list if room_status else f'⚠️无直播间') if b_u_l_c.get_cookies() else f'⚠️未登录账号'}")
     # 登录用户的直播预约字典
@@ -3660,8 +3745,12 @@ def script_defaults(settings):  # 设置其默认值
     widget.TextBox.loginStatus.Enabled = True
     widget.TextBox.loginStatus.ModifiedIs = True
     widget.TextBox.loginStatus.Type = obs.OBS_TEXT_INFO
-    widget.TextBox.loginStatus.Text = f'{uname} 已登录' if b_u_l_c.get_cookies() else '未登录，请登录后点击【更新账号列表】'
-    widget.TextBox.loginStatus.InfoType = obs.OBS_TEXT_INFO_NORMAL if b_u_l_c.get_cookies() else obs.OBS_TEXT_INFO_WARNING
+    widget.TextBox.loginStatus.Text = login_status_text
+    widget.TextBox.loginStatus.InfoType = (
+        obs.OBS_TEXT_INFO_NORMAL
+        if login_valid
+        else (obs.OBS_TEXT_INFO_ERROR if b_u_l_c.get_cookies() else obs.OBS_TEXT_INFO_WARNING)
+    )
 
     widget.ComboBox.uid.Visible = True
     widget.ComboBox.uid.Enabled = True
@@ -3723,7 +3812,7 @@ def script_defaults(settings):  # 设置其默认值
     # 分组框【直播间】
     # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
     widget.Group.room.Visible = True
-    widget.Group.room.Enabled = True
+    widget.Group.room.Enabled = login_valid
     widget.Group.room.ModifiedIs = False
     widget.Group.room.Type = obs.OBS_GROUP_NORMAL
     widget.Group.room.GroupProps = "room_props"
@@ -3852,7 +3941,7 @@ def script_defaults(settings):  # 设置其默认值
     # 分组框【直播】
     # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
     widget.Group.live.Visible = bool(room_status)
-    widget.Group.live.Enabled = bool(room_status)
+    widget.Group.live.Enabled = bool(room_status and login_valid)
     widget.Group.live.ModifiedIs = False
     widget.Group.live.Type = obs.OBS_GROUP_NORMAL
     widget.Group.live.GroupProps = "live_props"
@@ -4133,9 +4222,14 @@ def script_properties():  # 建立控件
             # 添加按钮控件
             log_save(0, f"按钮控件: {w.Name} 【{w.Description}】")
             w.Obj = obs.obs_properties_add_button(props_dict[w.Props], w.Name, w.Description, w.Callback)
-            obs.obs_property_button_set_type(w.Obj, w.Type)
             if w.Type == obs.OBS_BUTTON_URL:  # 是否为链接跳转按钮
-                obs.obs_property_button_set_url(w.Obj, w.Url)
+                try:
+                    obs.obs_property_button_set_type(w.Obj, w.Type)
+                    obs.obs_property_button_set_url(w.Obj, w.Url)
+                except TypeError as e:
+                    # 部分 OBS/SWIG 版本不能把导出的整数常量重新传回
+                    # enum obs_button_type。按钮回调会负责打开 URL。
+                    log_save(1, f"OBS URL 按钮类型设置不兼容，已启用回调降级方案：{e}")
         elif w.ControlType == "ComboBox":
             # 添加组合框控件
             log_save(0, f"组合框控件: {w.Name} 【{w.Description}】")
@@ -4147,7 +4241,27 @@ def script_properties():  # 建立控件
         elif w.ControlType == "Group":
             # 分组框控件
             log_save(0, f"分组框控件: {w.Name} 【{w.Description}】")
-            w.Obj = obs.obs_properties_add_group(props_dict[w.Props], w.Name, w.Description, w.Type, props_dict[w.GroupProps])
+            fallback_group_props = {
+                "account_group": "account_props",
+                "room_group": "room_props",
+                "live_group": "live_props",
+            }
+            group_props_name = w.GroupProps or fallback_group_props.get(w.Name)
+            if group_props_name not in props_dict:
+                log_save(3, f"分组框【{w.Description}】缺少有效属性集，已跳过")
+                continue
+            if w.GroupProps is None:
+                log_save(1, f"分组框【{w.Description}】属性未初始化，已使用 {group_props_name} 恢复")
+                w.GroupProps = group_props_name
+            if w.Type is None:
+                w.Type = obs.OBS_GROUP_NORMAL
+            w.Obj = obs.obs_properties_add_group(
+                props_dict[w.Props],
+                w.Name,
+                w.Description,
+                w.Type,
+                props_dict[group_props_name],
+            )
 
         if w.ModifiedIs:
             obs.obs_property_set_modified_callback(w.Obj, lambda ps, p, st, name=w.Name: property_modified(name))
@@ -5109,7 +5223,7 @@ def button_function_change_live_room_news():
     log_save(0, f"║║登录账户 的 直播间基本信息：{room_base_info if b_u_l_c.get_cookies() else f'⚠️未登录账号'}")
     # 获取 直播间公告
     room_news = (BilibiliApiMaster(ssl_verification=GlobalVariableOfData.sslVerification, cookie=
-        dict2cookie(b_u_l_c.get_cookies())).get_room_news() if room_status else None) if b_u_l_c.get_cookies() else None
+        dict2cookie(b_u_l_c.get_cookies())).get_room_news(room_id) if room_status else None) if b_u_l_c.get_cookies() else None
     """直播间公告"""
     log_save(0, f"║║登录账户 的 直播间公告：{(room_news if room_status else f'⚠️无直播间') if b_u_l_c.get_cookies() else f'⚠️未登录账号'}")
     # 设置控件前准备（获取数据）结束
@@ -5164,7 +5278,7 @@ def button_function_change_live_room_news():
     log_save(0, f"║║登录账户 的 直播间基本信息：{room_base_info if b_u_l_c.get_cookies() else f'⚠️未登录账号'}")
     # 获取 直播间公告
     room_news = (BilibiliApiMaster(ssl_verification=GlobalVariableOfData.sslVerification, cookie=
-        dict2cookie(b_u_l_c.get_cookies())).get_room_news() if room_status else None) if b_u_l_c.get_cookies() else None
+        dict2cookie(b_u_l_c.get_cookies())).get_room_news(room_id) if room_status else None) if b_u_l_c.get_cookies() else None
     """直播间公告"""
     log_save(0, f"║║登录账户 的 直播间公告：{(room_news if room_status else f'⚠️无直播间') if b_u_l_c.get_cookies() else f'⚠️未登录账号'}")
     # 设置控件前准备（获取数据）结束
@@ -5570,7 +5684,14 @@ def button_function_jump_blive_web(props, prop):
     Returns:
     """
     log_save(0, f"即将跳转到网页{widget.Button.bliveWebJump.Url}")
-    pass
+    try:
+        # 原生 URL 按钮由 OBS 自己打开网页；降级为普通按钮时才由
+        # Python 打开，避免兼容版本中重复弹出两个浏览器标签页。
+        if obs.obs_property_button_type(prop) != obs.OBS_BUTTON_URL:
+            webbrowser.open(widget.Button.bliveWebJump.Url)
+    except (AttributeError, TypeError):
+        webbrowser.open(widget.Button.bliveWebJump.Url)
+    return False
 
 
 # ____________________-------------------____________________---------------------_______________________---------------
