@@ -2751,8 +2751,9 @@ class BilibiliApiGeneric:
         @rtype: Dict
         """
         api = f'https://passport.bilibili.com/x/passport-login/web/qrcode/poll?qrcode_key={qrcode_key}'
-        poll_return = requests.get(verify=self.sslVerification, url = api, data=qrcode_key, headers=self.headers).json()
-        data = poll_return['data']
+        poll_response = requests.get(verify=self.sslVerification, url = api, headers=self.headers)
+        poll_return = poll_response.json()
+        data = poll_return.get('data') or {}
         cookies: Dict[str, str] = {}
         """
         - DedeUserID:           用户id
@@ -2760,7 +2761,7 @@ class BilibiliApiGeneric:
         - SESSDATA:             账户密钥
         - bili_jct:             csrf鉴权
         """
-        code: int = data['code']
+        code: int = data.get('code', poll_return.get('code', -1))
         """
         - 0：    扫码登录成功 
         - 86038：二维码已失效 
@@ -2768,11 +2769,24 @@ class BilibiliApiGeneric:
         - 86101：未扫码
         """
         if code == 0:  # code = 0 代表登陆成功
-            data_dict = url2dict(data['url'])
-            cookies["DedeUserID"] = data_dict['DedeUserID']
-            cookies["DedeUserID__ckMd5"] = data_dict['DedeUserID__ckMd5']
-            cookies["SESSDATA"] = data_dict['SESSDATA']
-            cookies["bili_jct"] = data_dict['bili_jct']
+            required_keys = ("DedeUserID", "DedeUserID__ckMd5", "SESSDATA", "bili_jct")
+            # 优先使用响应头 Set-Cookie 下发的 cookie（原样保留编码，最可靠）
+            set_cookies = poll_response.cookies.get_dict()
+            # 回退：从跳转 url 的参数中解析（不做二次解码与类型转换）
+            url_params = {}
+            if data.get('url'):
+                url_params = {k: v[0] for k, v in parse_qs(urlparse(data['url']).query, keep_blank_values=True).items() if v}
+            for key in required_keys:
+                value = set_cookies.get(key) or url_params.get(key)
+                if value:
+                    cookies[key] = str(value)
+            missing = [k for k in required_keys if k not in cookies]
+            if missing:
+                # 关键 cookie 缺失时视为登录失败，避免 KeyError 中断轮询
+                log_save(3, f"扫码登录成功但缺少 cookie 字段{missing}，接口返回: {data}")
+                return {'code': code, 'cookies': {}}
+            if data.get('refresh_token'):
+                cookies["refresh_token"] = data['refresh_token']
             # 补充 cookie
             buvid3 = requests.get(verify=self.sslVerification, url = f'https://www.bilibili.com/video/', headers=self.headers)
             cookies.update(buvid3.cookies.get_dict())
@@ -3238,6 +3252,49 @@ class BilibiliApiMaster:
         ChangeRoomArea_ReturnValue = requests.post(verify=self.sslVerification, url = api, headers=headers, params=AnchorChangeRoomArea_data).json()
         return ChangeRoomArea_ReturnValue
 
+    # 直播姬版本缓存（类级别，避免每次开播都请求）
+    _livehime_version_cache = {"version": "", "build": 0, "ts": 0.0}
+
+    def get_latest_livehime_version(self, cache_seconds=6 * 3600):
+        """
+        获取最新的直播姬（PC）版本号与 build。
+
+        B站会对使用过旧客户端版本开播的请求返回 60024（需要人脸认证），
+        因此开播时应携带最新的直播姬版本信息。
+
+        Returns:
+            (version, build) 例如 ("8.15.0.11311", 11311)；获取失败时返回内置兜底版本
+        """
+        fallback = ("7.64.0.10819", 10819)
+        cache = type(self)._livehime_version_cache
+        if cache["version"] and time.time() - cache["ts"] < cache_seconds:
+            return cache["version"], cache["build"]
+        try:
+            params = {
+                "appkey": "aae92bc66f3edfab",
+                "system_version": 2,
+                "ts": int(time.time()),
+            }
+            query = "&".join("{}={}".format(k, v) for k, v in sorted(params.items()))
+            params["sign"] = hashlib.md5((query + "af125a0d5279fd576c1b4418a3e8276d").encode("utf-8")).hexdigest()
+            response = requests.get(
+                url="https://api.live.bilibili.com/xlive/app-blink/v1/liveVersionInfo/getHomePageLiveVersion",
+                params=params,
+                headers={"User-Agent": "LiveHime/" + fallback[0] + " os/Windows pc_app/livehime"},
+                verify=getattr(self, "verify_ssl", getattr(self, "sslVerification", True)),
+                timeout=10
+            )
+            result = response.json()
+            data = result.get("data") or {}
+            version = data.get("curr_version")
+            build = data.get("build")
+            if result.get("code") == 0 and version and build:
+                cache.update({"version": str(version), "build": int(build), "ts": time.time()})
+                return cache["version"], cache["build"]
+        except Exception:
+            pass
+        return fallback
+
     def start_live(self, area_id: int,  platform: Literal["pc_link", "web_link", "android_link"]):
         """
         开始直播
@@ -3249,13 +3306,20 @@ class BilibiliApiMaster:
         api = "https://api.live.bilibili.com/room/v1/Room/startLive"
         headers = self.headers
         csrf = self.csrf
+        # ---- 动态获取最新直播姬版本（版本过旧会触发 60024 人脸认证） ----
+        livehime_version, livehime_build = self.get_latest_livehime_version()
+        headers = dict(headers)  # 复制，避免污染 self.headers
+        if platform == "pc_link":
+            headers["User-Agent"] = "LiveHime/{} os/Windows pc_app/livehime build/{} osVer/10.0_x86_64".format(livehime_version, livehime_build)
+
         startLivedata = {
             "access_key": "",  # 留空
             "appkey": "aae92bc66f3edfab",  # 固定应用密钥
             "platform": platform,  # 直播姬（pc）：pc_link、web在线直播：web_link、bililink：android_link
             "room_id": self.get_room_highlight_state(),
             "area_v2": area_id,
-            "build": "9343",  # 客户端版本号
+            "build": str(livehime_build),  # 客户端版本号（动态获取最新直播姬版本）
+            "version": livehime_version,
             "backup_stream": 0,
             "csrf": csrf,
             "csrf_token": csrf,

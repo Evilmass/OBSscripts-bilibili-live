@@ -241,11 +241,59 @@ class BilibiliCSRFAuthenticator:
         self.user_id = self.cookies.get('DedeUserID', '')
         self.buvid3 = self.cookies.get('buvid3', '')
 
-    def start_live(self, room_id: int, area_id: int, platform: str = "pc_link", build: str = "10819", version: str = "7.64.0.10819") -> Dict[str, Any]:
+    # 直播姬版本缓存（类级别，避免每次开播都请求）
+    _livehime_version_cache = {"version": "", "build": 0, "ts": 0.0}
+
+    def get_latest_livehime_version(self, cache_seconds=6 * 3600):
+        """
+        获取最新的直播姬（PC）版本号与 build。
+
+        B站会对使用过旧客户端版本开播的请求返回 60024（需要人脸认证），
+        因此开播时应携带最新的直播姬版本信息。
+
+        Returns:
+            (version, build) 例如 ("8.15.0.11311", 11311)；获取失败时返回内置兜底版本
+        """
+        fallback = ("7.64.0.10819", 10819)
+        cache = type(self)._livehime_version_cache
+        if cache["version"] and time.time() - cache["ts"] < cache_seconds:
+            return cache["version"], cache["build"]
+        try:
+            params = {
+                "appkey": "aae92bc66f3edfab",
+                "system_version": 2,
+                "ts": int(time.time()),
+            }
+            query = "&".join("{}={}".format(k, v) for k, v in sorted(params.items()))
+            params["sign"] = hashlib.md5((query + "af125a0d5279fd576c1b4418a3e8276d").encode("utf-8")).hexdigest()
+            response = requests.get(
+                url="https://api.live.bilibili.com/xlive/app-blink/v1/liveVersionInfo/getHomePageLiveVersion",
+                params=params,
+                headers={"User-Agent": "LiveHime/" + fallback[0] + " os/Windows pc_app/livehime"},
+                verify=getattr(self, "verify_ssl", getattr(self, "sslVerification", True)),
+                timeout=10
+            )
+            result = response.json()
+            data = result.get("data") or {}
+            version = data.get("curr_version")
+            build = data.get("build")
+            if result.get("code") == 0 and version and build:
+                cache.update({"version": str(version), "build": int(build), "ts": time.time()})
+                return cache["version"], cache["build"]
+        except Exception:
+            pass
+        return fallback
+
+    def start_live(self, room_id: int, area_id: int, platform: str = "pc_link", build: str = None, version: str = None) -> Dict[str, Any]:
         """
         开播请求，支持额外参数，模拟官方客户端行为
         """
         api = "https://api.live.bilibili.com/room/v1/Room/startLive"
+        # 未指定版本时动态获取最新直播姬版本（版本过旧会触发 60024 人脸认证）
+        if not build or not version:
+            latest_version, latest_build = self.get_latest_livehime_version()
+            build = build or str(latest_build)
+            version = version or latest_version
         headers = self.headers.copy()
         csrf = self.csrf
         ts = str(int(time.time()))
@@ -273,6 +321,7 @@ class BilibiliCSRFAuthenticator:
 
         if platform == "pc_link":
             headers["X-Event-TraceID"] = f"PC_LINK:{uuid.uuid4()}:{int(time.time() * 1000)}"
+            headers["User-Agent"] = "LiveHime/{} os/Windows pc_app/livehime build/{} osVer/10.0_x86_64".format(version, build)
         if self.buvid3:
             headers["buvid"] = self.buvid3
         headers["Content-Type"] = "application/x-www-form-urlencoded"
